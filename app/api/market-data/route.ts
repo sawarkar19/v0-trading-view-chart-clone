@@ -9,72 +9,63 @@ interface CandleData {
   date: string
 }
 
-// Free API sources with fallback logic
 const API_SOURCES = {
   STOCKS: [
     {
-      name: "Polygon.io",
+      name: "Finnhub Stock API",
       fetch: async (symbol: string, timeframe: string) => {
-        // Polygon.io free tier - no key required for basic data
-        const multiplier = timeframe === "1D" ? 1 : 7
-        const timespan = timeframe === "1D" ? "day" : "week"
-        const url = `https://api.polygon.io/v2/aggs/ticker/${symbol}/range/${multiplier}/${timespan}/1?limit=100&sort=asc`
+        // Finnhub free tier - 60 calls/min
+        const apiKey = process.env.FINNHUB_API_KEY || "demo" // Demo key works for testing
+        const resolution = timeframe === "1D" ? "D" : "W"
+        const from = Math.floor((Date.now() - 100 * 86400000) / 1000)
+        const to = Math.floor(Date.now() / 1000)
+
+        const url = `https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=${resolution}&from=${from}&to=${to}&token=${apiKey}`
 
         const res = await fetch(url)
         const data = await res.json()
 
-        if (!data.results || data.results.length === 0) {
-          throw new Error("No data from Polygon.io")
+        if (data.s === "no_data" || !data.c || data.c.length === 0) {
+          throw new Error("No data from Finnhub")
         }
 
-        return data.results.map((candle: any) => ({
-          date: new Date(candle.t).toISOString(),
-          open: candle.o,
-          high: candle.h,
-          low: candle.l,
-          close: candle.c,
-          volume: candle.v || 0,
+        return data.c.map((close: number, idx: number) => ({
+          date: new Date(data.t[idx] * 1000).toISOString(),
+          open: data.o[idx],
+          high: data.h[idx],
+          low: data.l[idx],
+          close: close,
+          volume: data.v?.[idx] || 0,
         }))
       },
     },
     {
-      name: "Yahoo Finance",
+      name: "YahooFinance Alternative",
       fetch: async (symbol: string, timeframe: string) => {
-        // Yahoo Finance via RapidAPI (free tier available)
-        const period = timeframe === "1D" ? "1d" : "1wk"
-        const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`
+        // Use a free alternative that doesn't require auth
+        const url = `https://query1.finance.yahoo.com/v7/finance/download/${symbol}?interval=1d&events=history`
 
         const res = await fetch(url)
-        const data = await res.json()
+        if (!res.ok) throw new Error("Yahoo Finance failed")
 
-        if (!data.quoteSummary?.result) {
-          throw new Error("No data from Yahoo Finance")
-        }
+        const csv = await res.text()
+        const lines = csv.split("\n").slice(1, 101) // Get last 100 days
 
-        // Generate mock candles from current price (Yahoo doesn't provide free OHLC)
-        const price = data.quoteSummary.result[0].price.regularMarketPrice
-        const candles: CandleData[] = []
-        let currentPrice = price
+        if (lines.length === 0) throw new Error("No data from Yahoo")
 
-        for (let i = 100; i > 0; i--) {
-          const variation = (Math.random() - 0.5) * 0.02
-          currentPrice = currentPrice * (1 + variation)
-          const open = currentPrice
-          const close = currentPrice * (1 + (Math.random() - 0.5) * 0.01)
-          const high = Math.max(open, close) * (1 + Math.random() * 0.01)
-          const low = Math.min(open, close) * (1 - Math.random() * 0.01)
-
-          candles.push({
-            date: new Date(Date.now() - i * 86400000).toISOString(),
-            open,
-            high,
-            low,
-            close,
-            volume: Math.floor(Math.random() * 100000000),
+        return lines
+          .filter((line) => line.trim())
+          .map((line) => {
+            const [date, open, high, low, close, adjClose, volume] = line.split(",")
+            return {
+              date: new Date(date).toISOString(),
+              open: Number.parseFloat(open),
+              high: Number.parseFloat(high),
+              low: Number.parseFloat(low),
+              close: Number.parseFloat(close),
+              volume: Number.parseInt(volume),
+            }
           })
-        }
-
-        return candles
       },
     },
     {
@@ -111,11 +102,38 @@ const API_SOURCES = {
   ],
   CRYPTO: [
     {
-      name: "CoinGecko Simple",
+      name: "Binance",
       fetch: async (symbol: string, timeframe: string) => {
-        // CoinGecko free market data endpoint
+        // Binance free API - completely free, no key required
+        const pair = `${symbol}USDT`
+        const interval = timeframe === "1D" ? "1d" : "1w"
+        const url = `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${interval}&limit=100`
+
+        const res = await fetch(url)
+        if (!res.ok) throw new Error("Binance API error")
+
+        const data = await res.json()
+
+        if (!Array.isArray(data) || data.length === 0) {
+          throw new Error("No data from Binance")
+        }
+
+        return data.map((candle: any[]) => ({
+          date: new Date(candle[0]).toISOString(),
+          open: Number.parseFloat(candle[1]),
+          high: Number.parseFloat(candle[2]),
+          low: Number.parseFloat(candle[3]),
+          close: Number.parseFloat(candle[4]),
+          volume: Number.parseFloat(candle[7]),
+        }))
+      },
+    },
+    {
+      name: "CoinGecko",
+      fetch: async (symbol: string, timeframe: string) => {
+        // CoinGecko free API - no key required
         const coinId = symbol.toLowerCase()
-        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true`
+        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_market_cap=true&include_24hr_vol=true`
 
         const res = await fetch(url)
         const data = await res.json()
@@ -152,41 +170,14 @@ const API_SOURCES = {
         return candles
       },
     },
-    {
-      name: "Binance",
-      fetch: async (symbol: string, timeframe: string) => {
-        // Binance free API - no key required
-        const pair = `${symbol}USDT`
-        const interval = timeframe === "1D" ? "1d" : "1w"
-        const url = `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${interval}&limit=100`
-
-        const res = await fetch(url)
-        if (!res.ok) throw new Error("Binance API error")
-
-        const data = await res.json()
-
-        if (!Array.isArray(data) || data.length === 0) {
-          throw new Error("No data from Binance")
-        }
-
-        return data.map((candle: any[]) => ({
-          date: new Date(candle[0]).toISOString(),
-          open: Number.parseFloat(candle[1]),
-          high: Number.parseFloat(candle[2]),
-          low: Number.parseFloat(candle[3]),
-          close: Number.parseFloat(candle[4]),
-          volume: Number.parseFloat(candle[7]),
-        }))
-      },
-    },
   ],
   FOREX: [
     {
       name: "Exchangerate-API",
       fetch: async (symbol: string, timeframe: string) => {
-        // Extract currency pair
-        const from = symbol.substring(0, 3)
-        const to = symbol.substring(3, 6)
+        // Extract currency pair (e.g., EURUSD -> EUR, USD)
+        const from = symbol.substring(0, 3).toUpperCase()
+        const to = symbol.substring(3, 6).toUpperCase()
 
         const url = `https://api.exchangerate-api.com/v4/latest/${from}`
         const res = await fetch(url)
@@ -261,7 +252,7 @@ function detectAssetType(symbol: string): "STOCKS" | "CRYPTO" | "FOREX" {
     return "CRYPTO"
   }
 
-  // Forex pairs have format like EURUSD, GBPUSD
+  // Forex pairs have format like EURUSD, GBPUSD, XAUUSD
   if (symbol.length === 6 && /^[A-Z]{3}[A-Z]{3}$/.test(symbol)) {
     return "FOREX"
   }
